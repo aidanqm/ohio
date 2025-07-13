@@ -10,13 +10,15 @@ class ChatServer extends EventEmitter {
         this.maxClients = options.maxClients || 1000;
         this.rateLimit = options.rateLimit || { messages: 20, window: 60000 }; // 20 messages per minute
         this.maxMessageLength = options.maxMessageLength || 1000;
-        this.heartbeatInterval = options.heartbeatInterval || 30000;
+        this.heartbeatInterval = options.heartbeatInterval || 60000;
         this.cleanupInterval = options.cleanupInterval || 60000;
         
         this.clients = new Map();
         this.messageHistory = [];
         this.maxHistorySize = 100;
         this.bannedIPs = new Set();
+        this.connectionsPerIP = new Map();
+        this.maxPerIP = 2;
         
         this.server = null;
         this.wss = null;
@@ -78,6 +80,13 @@ class ChatServer extends EventEmitter {
             return;
         }
         
+        let ipConnections = this.connectionsPerIP.get(clientIP) || 0;
+        if (ipConnections >= this.maxPerIP) {
+            console.log(`Rejected connection: too many from IP ${clientIP}`);
+            ws.close(1008, 'Too many connections from your IP');
+            return;
+        }
+        
         if (this.clients.size >= this.maxClients) {
             console.log(`Rejected connection: server full (${this.clients.size}/${this.maxClients})`);
             ws.close(1013, 'Server full');
@@ -98,6 +107,7 @@ class ChatServer extends EventEmitter {
         };
         
         this.clients.set(clientId, client);
+        this.connectionsPerIP.set(clientIP, (this.connectionsPerIP.get(clientIP) || 0) + 1);
         this.stats.totalConnections++;
         this.stats.currentConnections++;
         
@@ -273,6 +283,14 @@ class ChatServer extends EventEmitter {
     handleDisconnection(client, code, reason) {
         this.clients.delete(client.id);
         this.stats.currentConnections--;
+        
+        let ipConnections = this.connectionsPerIP.get(client.ip) || 0;
+        if (ipConnections > 0) {
+            this.connectionsPerIP.set(client.ip, ipConnections - 1);
+            if (ipConnections - 1 === 0) {
+                this.connectionsPerIP.delete(client.ip);
+            }
+        }
         
         console.log(`Client disconnected: ${client.id} (${client.username || 'unknown'}) - Code: ${code}, Reason: ${reason}`);
         
@@ -550,10 +568,6 @@ const server = new ChatServer({
     maxMessageLength: 500,
     heartbeatInterval: 30000,
     cleanupInterval: 60000
-});
-
-server.on('chatMessage', (client, message) => {
-    console.log(`Chat message from ${client.username}: ${message.message}`);
 });
 
 server.on('clientConnected', (client) => {
