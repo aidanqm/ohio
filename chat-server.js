@@ -8,7 +8,7 @@ class ChatServer extends EventEmitter {
         super();
         this.port = options.port || process.env.PORT || 8080;
         this.maxClients = options.maxClients || 1000;
-        this.rateLimit = options.rateLimit || { messages: 15, window: 60000 }; // 10 messages per minute
+        this.rateLimit = options.rateLimit || { messages: 10, window: 60000 }; // 10 messages per minute
         this.maxMessageLength = options.maxMessageLength || 1000;
         this.heartbeatInterval = options.heartbeatInterval || 30000;
         this.cleanupInterval = options.cleanupInterval || 60000;
@@ -61,8 +61,8 @@ class ChatServer extends EventEmitter {
             server: this.server,
             path: '/chat',
             perMessageDeflate: true,
-            maxPayload: 16 * 1024, 
-            clientTracking: false 
+            maxPayload: 16 * 1024, // 16KB max message size
+            clientTracking: false // We'll handle tracking ourselves
         });
         
         this.wss.on('connection', (ws, req) => this.handleConnection(ws, req));
@@ -212,6 +212,18 @@ class ChatServer extends EventEmitter {
                 timestamp: Date.now()
             });
             return;
+        }
+        
+        // Check if username is already taken by another client
+        if (!client.username || client.username !== message.sender) {
+            if (this.isUsernameTaken(message.sender, client.id)) {
+                this.sendToClient(client, {
+                    type: 'error',
+                    message: `Username '${message.sender}' is already taken. Please choose a different username.`,
+                    timestamp: Date.now()
+                });
+                return;
+            }
         }
         
         client.username = message.sender;
@@ -439,6 +451,15 @@ class ChatServer extends EventEmitter {
         return crypto.randomBytes(8).toString('hex');
     }
     
+    isUsernameTaken(username, excludeClientId = null) {
+        for (const [clientId, client] of this.clients) {
+            if (clientId !== excludeClientId && client.username === username) {
+                return true;
+            }
+        }
+        return false;
+    }
+    
     handleStatsRequest(res) {
         const stats = {
             ...this.stats,
@@ -532,15 +553,15 @@ const server = new ChatServer({
 });
 
 server.on('chatMessage', (client, message) => {
-    console.log(`📝 ${client.username}: ${message.message}`);
+    console.log(`Chat message from ${client.username}: ${message.message}`);
 });
 
 server.on('clientConnected', (client) => {
-    console.log(`✅ Client connected: ${client.id} from ${client.ip}`);
+    console.log(`Client connected: ${client.id} from ${client.ip}`);
 });
 
 server.on('clientDisconnected', (client) => {
-    console.log(`❌ Client disconnected: ${client.username || client.id}`);
+    console.log(`Client disconnected: ${client.username || client.id}`);
 });
 
 process.on('SIGINT', async () => {
