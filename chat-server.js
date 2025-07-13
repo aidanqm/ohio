@@ -8,7 +8,7 @@ class ChatServer extends EventEmitter {
         super();
         this.port = options.port || process.env.PORT || 8080;
         this.maxClients = options.maxClients || 1000;
-        this.rateLimit = options.rateLimit || { messages: 10, window: 60000 }; // 10 messages per minute
+        this.rateLimit = options.rateLimit || { messages: 20, window: 60000 }; // 20 messages per minute
         this.maxMessageLength = options.maxMessageLength || 1000;
         this.heartbeatInterval = options.heartbeatInterval || 30000;
         this.cleanupInterval = options.cleanupInterval || 60000;
