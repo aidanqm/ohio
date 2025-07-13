@@ -3,6 +3,8 @@ const http = require('http');
 const crypto = require('crypto');
 const EventEmitter = require('events');
 const https = require('https');
+const fs = require('fs');
+const path = require('path');
 
 class ChatServer extends EventEmitter {
     constructor(options = {}) {
@@ -19,7 +21,7 @@ class ChatServer extends EventEmitter {
         this.maxHistorySize = 100;
         this.bannedIPs = new Set();
         this.connectionsPerIP = new Map();
-        this.maxPerIP = 5;
+        this.maxPerIP = 2;
         
         this.server = null;
         this.wss = null;
@@ -35,6 +37,10 @@ class ChatServer extends EventEmitter {
         this.profanityWords = new Set();
         this.profanityFilterLoaded = false;
         
+        this.usersData = {};
+        this.friendRequests = new Map(); // username -> array of pending requests {from, timestamp}
+        this.loadUsersData();
+
         this.initServer();
         this.startCleanupTask();
         this.loadProfanityFilter();
@@ -109,7 +115,9 @@ class ChatServer extends EventEmitter {
             messageCount: 0,
             rateLimitReset: Date.now() + this.rateLimit.window,
             username: null,
-            isAlive: true
+            isAlive: true,
+            friends: [],
+            pendingRequests: []
         };
         
         this.clients.set(clientId, client);
@@ -192,6 +200,18 @@ class ChatServer extends EventEmitter {
             case 'setUsername':
                 this.handleSetUsername(client, message);
                 break;
+            case 'addFriend':
+                this.handleAddFriend(client, message);
+                break;
+            case 'acceptFriend':
+                this.handleAcceptFriend(client, message);
+                break;
+            case 'dm':
+                this.handleDM(client, message);
+                break;
+            case 'getOnlineUsers':
+                this.broadcastOnlineUsers();
+                break;
             default:
                 this.sendToClient(client, {
                     type: 'error',
@@ -246,12 +266,20 @@ class ChatServer extends EventEmitter {
         client.messageCount++;
         this.stats.totalMessages++;
         
+        const mentions = [];
+        const mentionRegex = /@(\w+)/g;
+        let match;
+        while ((match = mentionRegex.exec(sanitizedMessage)) !== null) {
+            mentions.push(match[1]);
+        }
+        
         const chatMessage = {
             type: 'chat',
             sender: message.sender,
             message: sanitizedMessage,
             timestamp: message.timestamp || Date.now(),
-            messageId: this.generateMessageId()
+            messageId: this.generateMessageId(),
+            mentions: mentions
         };
         
         this.addToHistory(chatMessage);
@@ -271,8 +299,40 @@ class ChatServer extends EventEmitter {
     
     handleSetUsername(client, message) {
         if (message.username && typeof message.username === 'string') {
+            const username = message.username.trim().substring(0, 50);
+            if (username.length === 0) return;
+            
+            // Check uniqueness
+            let isTaken = false;
+            for (const [, cl] of this.clients) {
+                if (cl.username === username && cl.id !== client.id) {
+                    isTaken = true;
+                    break;
+                }
+            }
+            
+            if (isTaken) {
+                this.sendToClient(client, {
+                    type: 'error',
+                    message: 'Username already taken',
+                    timestamp: Date.now()
+                });
+                return;
+            }
+            
             const oldUsername = client.username;
-            client.username = message.username.substring(0, 50); // Limit username length
+            client.username = username;
+            
+            // Load user data
+            if (!this.usersData[username]) {
+                this.usersData[username] = {
+                    friends: [],
+                    pendingRequests: []
+                };
+            }
+            
+            client.friends = this.usersData[username].friends;
+            client.pendingRequests = this.usersData[username].pendingRequests;
             
             this.sendToClient(client, {
                 type: 'usernameSet',
@@ -280,9 +340,24 @@ class ChatServer extends EventEmitter {
                 timestamp: Date.now()
             });
             
+            // Send friends and requests
+            this.sendToClient(client, {
+                type: 'friendList',
+                friends: client.friends,
+                timestamp: Date.now()
+            });
+            
+            this.sendToClient(client, {
+                type: 'friendRequests',
+                requests: client.pendingRequests,
+                timestamp: Date.now()
+            });
+            
             if (oldUsername !== client.username) {
                 console.log(`Client ${client.id} changed username from ${oldUsername} to ${client.username}`);
             }
+            
+            this.broadcastOnlineUsers();
         }
     }
     
@@ -301,6 +376,8 @@ class ChatServer extends EventEmitter {
         console.log(`Client disconnected: ${client.id} (${client.username || 'unknown'}) - Code: ${code}, Reason: ${reason}`);
         
         this.emit('clientDisconnected', client, code, reason);
+        this.broadcastOnlineUsers();
+        this.saveUsersData();
     }
     
     handleClientError(client, error) {
@@ -591,6 +668,9 @@ class ChatServer extends EventEmitter {
                         }
                     }
                     
+                    // Add specific words to the profanity filter
+                    this.profanityWords.add('nigga');
+
                     this.profanityFilterLoaded = true;
                     console.log(`Profanity filter loaded: ${this.profanityWords.size} words`);
                 } catch (error) {
@@ -648,6 +728,9 @@ class ChatServer extends EventEmitter {
                         }
                     }
                     
+                    
+                    this.profanityWords.add('nigga');
+
                     this.profanityFilterLoaded = true;
                     console.log(`Profanity filter loaded: ${this.profanityWords.size} words`);
                 } catch (error) {
@@ -684,6 +767,202 @@ class ChatServer extends EventEmitter {
         }
         
         return false;
+    }
+
+    loadUsersData() {
+        const dataPath = path.join(__dirname, 'users.json');
+        if (fs.existsSync(dataPath)) {
+            try {
+                const data = fs.readFileSync(dataPath, 'utf8');
+                this.usersData = JSON.parse(data);
+                console.log('Loaded users data');
+            } catch (err) {
+                console.error('Error loading users data:', err);
+                this.usersData = {};
+            }
+        } else {
+            this.usersData = {};
+        }
+    }
+
+    saveUsersData() {
+        const dataPath = path.join(__dirname, 'users.json');
+        try {
+            fs.writeFileSync(dataPath, JSON.stringify(this.usersData, null, 2));
+            console.log('Saved users data');
+        } catch (err) {
+            console.error('Error saving users data:', err);
+        }
+    }
+
+    broadcastOnlineUsers() {
+        const users = Array.from(this.clients.values()).map(cl => ({
+            username: cl.username,
+            status: 'online', // Can expand later
+            last_seen: Date.now()
+        })).filter(u => u.username);
+        
+        this.broadcast({
+            type: 'onlineUsers',
+            users: users,
+            timestamp: Date.now()
+        });
+    }
+
+    handleAddFriend(sender, message) {
+        const targetUsername = message.target;
+        if (!targetUsername || targetUsername === sender.username) return;
+        
+        // Find target client
+        let targetClient = null;
+        for (const [, cl] of this.clients) {
+            if (cl.username === targetUsername) {
+                targetClient = cl;
+                break;
+            }
+        }
+        
+        if (!targetClient) {
+            this.sendToClient(sender, {
+                type: 'error',
+                message: 'User not found',
+                timestamp: Date.now()
+            });
+            return;
+        }
+        
+        // Check if already friends
+        if (this.usersData[targetUsername].friends.includes(sender.username)) {
+            this.sendToClient(sender, {
+                type: 'error',
+                message: 'Already friends',
+                timestamp: Date.now()
+            });
+            return;
+        }
+        
+        // Check if request already pending
+        if (this.usersData[targetUsername].pendingRequests.some(req => req.from === sender.username)) {
+            this.sendToClient(sender, {
+                type: 'error',
+                message: 'Request already pending',
+                timestamp: Date.now()
+            });
+            return;
+        }
+        
+        // Add pending request
+        this.usersData[targetUsername].pendingRequests.push({
+            from: sender.username,
+            timestamp: Date.now()
+        });
+        
+        // Send notification to target
+        this.sendToClient(targetClient, {
+            type: 'friendRequest',
+            from: sender.username,
+            timestamp: Date.now()
+        });
+        
+        // Update sender
+        this.sendToClient(sender, {
+            type: 'system',
+            message: `Friend request sent to ${targetUsername}`,
+            timestamp: Date.now()
+        });
+        
+        this.saveUsersData();
+    }
+
+    handleAcceptFriend(client, message) {
+        const fromUsername = message.from;
+        if (!fromUsername) return;
+        
+        // Find the request
+        const reqIndex = this.usersData[client.username].pendingRequests.findIndex(req => req.from === fromUsername);
+        if (reqIndex === -1) return;
+        
+        // Remove from pending
+        this.usersData[client.username].pendingRequests.splice(reqIndex, 1);
+        
+        // Add to friends for both
+        this.usersData[client.username].friends.push(fromUsername);
+        if (!this.usersData[fromUsername]) {
+            this.usersData[fromUsername] = {friends: [], pendingRequests: []};
+        }
+        this.usersData[fromUsername].friends.push(client.username);
+        
+        // Send updates
+        this.sendToClient(client, {
+            type: 'friendAccepted',
+            from: fromUsername,
+            timestamp: Date.now()
+        });
+        
+        // Find from client if online
+        let fromClient = null;
+        for (const [, cl] of this.clients) {
+            if (cl.username === fromUsername) {
+                fromClient = cl;
+                break;
+            }
+        }
+        
+        if (fromClient) {
+            this.sendToClient(fromClient, {
+                type: 'friendAccepted',
+                from: client.username,
+                timestamp: Date.now()
+            });
+        }
+        
+        this.saveUsersData();
+    }
+
+    handleDM(sender, message) {
+        const recipientUsername = message.recipient;
+        const dmMessage = message.message;
+        if (!recipientUsername || !dmMessage || recipientUsername === sender.username) return;
+        
+        // Find recipient
+        let recipient = null;
+        for (const [, cl] of this.clients) {
+            if (cl.username === recipientUsername) {
+                recipient = cl;
+                break;
+            }
+        }
+        
+        if (!recipient) {
+            this.sendToClient(sender, {
+                type: 'error',
+                message: 'User not online',
+                timestamp: Date.now()
+            });
+            return;
+        }
+        
+        // Check if friends? Optional, for now allow any
+        // But perhaps check if friends
+        if (!this.usersData[sender.username].friends.includes(recipientUsername)) {
+            this.sendToClient(sender, {
+                type: 'error',
+                message: 'Can only DM friends',
+                timestamp: Date.now()
+            });
+            return;
+        }
+        
+        const dm = {
+            type: 'dm',
+            sender: sender.username,
+            recipient: recipientUsername,
+            message: dmMessage,
+            timestamp: Date.now()
+        };
+        
+        this.sendToClient(sender, dm);
+        this.sendToClient(recipient, dm);
     }
 }
 
