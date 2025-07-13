@@ -21,7 +21,7 @@ class ChatServer extends EventEmitter {
         this.maxHistorySize = 100;
         this.bannedIPs = new Set();
         this.connectionsPerIP = new Map();
-        this.maxPerIP = 2;
+        this.maxPerIP = 5;
         
         this.server = null;
         this.wss = null;
