@@ -249,7 +249,7 @@ class ChatServer extends EventEmitter {
         };
         
         this.addToHistory(chatMessage);
-        this.broadcast(chatMessage, client.id);
+        this.broadcast(chatMessage);
         
         console.log(`Chat message from ${client.username} (${client.id}): ${sanitizedMessage}`);
         this.emit('chatMessage', client, chatMessage);
@@ -359,13 +359,11 @@ class ChatServer extends EventEmitter {
         return false;
     }
     
-    broadcast(message, excludeClientId = null) {
+    broadcast(message) {
         let sentCount = 0;
         let failedCount = 0;
         
         for (const [clientId, client] of this.clients) {
-            if (clientId === excludeClientId) continue;
-            
             if (this.sendToClient(client, message)) {
                 sentCount++;
             } else {
