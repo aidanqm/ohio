@@ -21,7 +21,7 @@ class ChatServer extends EventEmitter {
         this.maxHistorySize = 100;
         this.bannedIPs = new Set();
         this.connectionsPerIP = new Map();
-        this.maxPerIP = 5;
+        this.maxPerIP = 2;
         
         this.server = null;
         this.wss = null;
@@ -687,84 +687,34 @@ class ChatServer extends EventEmitter {
     
     censorProfanity(message) {
         if (!this.profanityFilterLoaded || this.profanityWords.size === 0) {
-            return message; // Don't modify if filter isn't loaded
+            return message;
         }
         
         let censored = message;
         
-        // Sort profanity words by length (longest first) to handle compound words
         const sortedProfanity = Array.from(this.profanityWords).sort((a, b) => b.length - a.length);
         
         for (const badWord of sortedProfanity) {
-            // Create a regex that matches the word with word boundaries
-            const regex = new RegExp(`\\b${badWord}\\b`, 'gi');
+            const escapedWord = badWord.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+            const regex = new RegExp(`\\b${escapedWord}\\b`, 'gi');
             censored = censored.replace(regex, '*'.repeat(badWord.length));
-            
-            // Also check for the word without word boundaries (for compound words)
-            const regexNoWordBoundary = new RegExp(badWord, 'gi');
-            censored = censored.replace(regexNoWordBoundary, '*'.repeat(badWord.length));
         }
         
         return censored;
     }
 
-    loadProfanityFilter() {
-        const url = 'https://raw.githubusercontent.com/thisandagain/washyourmouthoutwithsoap/refs/heads/develop/data/build.json';
-        
-        console.log('Loading profanity filter from URL...');
-        
-        https.get(url, (res) => {
-            let data = '';
-            
-            res.on('data', (chunk) => {
-                data += chunk;
-            });
-            
-            res.on('end', () => {
-                try {
-                    const filterData = JSON.parse(data);
-                    
-                    // Load all words from all languages into the set
-                    for (const [lang, words] of Object.entries(filterData)) {
-                        for (const word of words) {
-                            this.profanityWords.add(word.toLowerCase());
-                        }
-                    }
-                    
-                    
-                    this.profanityWords.add('nigga');
-
-                    this.profanityFilterLoaded = true;
-                    console.log(`Profanity filter loaded: ${this.profanityWords.size} words`);
-                } catch (error) {
-                    console.error('Error parsing profanity filter:', error);
-                }
-            });
-        }).on('error', (error) => {
-            console.error('Error fetching profanity filter:', error);
-        });
-    }
     
     containsProfanity(message) {
         if (!this.profanityFilterLoaded || this.profanityWords.size === 0) {
-            return false; // Don't block if filter isn't loaded
+            return false;
         }
         
         const lowerMessage = message.toLowerCase();
-        
-        // Check each word in the message
         const words = lowerMessage.split(/\s+/);
+        
         for (const word of words) {
-            // Remove common punctuation from word boundaries
             const cleanWord = word.replace(/[^a-z0-9]/gi, '');
             if (this.profanityWords.has(cleanWord)) {
-                return true;
-            }
-        }
-        
-        // Also check for words without spaces (concatenated)
-        for (const badWord of this.profanityWords) {
-            if (lowerMessage.includes(badWord)) {
                 return true;
             }
         }
