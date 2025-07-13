@@ -21,7 +21,7 @@ class ChatServer extends EventEmitter {
         this.maxHistorySize = 100;
         this.bannedIPs = new Set();
         this.connectionsPerIP = new Map();
-        this.maxPerIP = 5;
+        this.maxPerIP = 2;
         
         this.server = null;
         this.wss = null;
@@ -40,7 +40,7 @@ class ChatServer extends EventEmitter {
         this.usersData = {};
         this.friendRequests = new Map(); // username -> array of pending requests {from, timestamp}
         this.loadUsersData();
-
+        
         this.initServer();
         this.startCleanupTask();
         this.loadProfanityFilter();
@@ -205,6 +205,9 @@ class ChatServer extends EventEmitter {
                 break;
             case 'acceptFriend':
                 this.handleAcceptFriend(client, message);
+                break;
+            case 'removeFriend':
+                this.handleRemoveFriend(client, message);
                 break;
             case 'dm':
                 this.handleDM(client, message);
@@ -917,6 +920,80 @@ class ChatServer extends EventEmitter {
         }
         
         this.saveUsersData();
+    }
+
+    // Removes a friend relationship between the sender (client) and the specified target username
+    handleRemoveFriend(client, message) {
+        const targetUsername = message.target;
+        if (!targetUsername || targetUsername === client.username) {
+            return;
+        }
+
+        // Ensure both users exist in the stored data structure
+        if (!this.usersData[client.username]) {
+            this.usersData[client.username] = { friends: [], pendingRequests: [] };
+        }
+        if (!this.usersData[targetUsername]) {
+            this.sendToClient(client, {
+                type: 'error',
+                message: 'User not found',
+                timestamp: Date.now()
+            });
+            return;
+        }
+
+        const clientFriends = this.usersData[client.username].friends;
+        const targetFriends = this.usersData[targetUsername].friends;
+
+        // Verify they are actually friends
+        if (!clientFriends.includes(targetUsername)) {
+            this.sendToClient(client, {
+                type: 'error',
+                message: 'You are not friends with this user',
+                timestamp: Date.now()
+            });
+            return;
+        }
+
+        // Remove each other from friends lists
+        this.usersData[client.username].friends = clientFriends.filter((u) => u !== targetUsername);
+        this.usersData[targetUsername].friends = targetFriends.filter((u) => u !== client.username);
+
+        // Persist changes
+        this.saveUsersData();
+
+        // Notify initiator
+        this.sendToClient(client, {
+            type: 'friendRemoved',
+            username: targetUsername,
+            timestamp: Date.now()
+        });
+
+        // Attempt to notify target if online
+        for (const [, cl] of this.clients) {
+            if (cl.username === targetUsername) {
+                this.sendToClient(cl, {
+                    type: 'friendRemoved',
+                    username: client.username,
+                    timestamp: Date.now()
+                });
+
+                // Send updated friend list to target
+                this.sendToClient(cl, {
+                    type: 'friendList',
+                    friends: this.usersData[targetUsername].friends,
+                    timestamp: Date.now()
+                });
+                break;
+            }
+        }
+
+        // Send updated friend list to initiator
+        this.sendToClient(client, {
+            type: 'friendList',
+            friends: this.usersData[client.username].friends,
+            timestamp: Date.now()
+        });
     }
 
     handleDM(sender, message) {
